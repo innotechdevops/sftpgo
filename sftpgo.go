@@ -31,14 +31,52 @@ type SftpClient interface {
 	MoveFile(sourcePath string, destPath string) error
 	RemoveFile(dirPath string) error
 	Close() error
+	ConnectionLostHandler(err error)
 }
 
 type sftpClient struct {
-	*sftp.Client
+	Client    *sftp.Client
+	reconnect chan bool
+}
+
+// NewClient Create a new SFTP connection by given parameters
+func NewClient(c *Config) (SftpClient, error) {
+	client, err := connect(c)
+
+	reconnect := make(chan bool)
+	sftpConn := &sftpClient{Client: client, reconnect: reconnect}
+	go func() {
+		// Receive connection when connection lose
+		for {
+			select {
+			case res := <-reconnect:
+				if res {
+					conn, e := connect(c)
+					if e == nil {
+						sftpConn.Client = conn
+						slog.Info("Reconnected")
+					} else {
+						slog.Error("Reconnect failure", e)
+					}
+				}
+			}
+		}
+	}()
+
+	return sftpConn, err
+}
+
+func (sc *sftpClient) ConnectionLostHandler(err error) {
+	if strings.Contains(err.Error(), "connection lost") {
+		slog.Info("Reconnecting...")
+		sc.reconnect <- true
+	}
 }
 
 func (sc *sftpClient) MoveFile(sourcePath string, destPath string) error {
-	return sc.Rename(sourcePath, destPath)
+	err := sc.Client.Rename(sourcePath, destPath)
+	sc.ConnectionLostHandler(err)
+	return err
 }
 
 // WalkFiles
@@ -46,10 +84,11 @@ func (sc *sftpClient) MoveFile(sourcePath string, destPath string) error {
 func (sc *sftpClient) WalkFiles(remoteDir string) ([]string, error) {
 	files := []string{}
 
-	walker := sc.Walk(remoteDir)
+	walker := sc.Client.Walk(remoteDir)
 	for walker.Step() {
 		if err := walker.Err(); err != nil {
-			continue
+			sc.ConnectionLostHandler(err)
+			return files, err
 		}
 
 		if !(walker.Stat().IsDir()) {
@@ -62,9 +101,10 @@ func (sc *sftpClient) WalkFiles(remoteDir string) ([]string, error) {
 
 func (sc *sftpClient) OpenFile(remoteFile string) (*sftp.File, error) {
 	// Open the file
-	file, err := sc.Open(remoteFile)
+	file, err := sc.Client.Open(remoteFile)
 	if err != nil {
 		slog.Error(fmt.Sprintf("Error opening file %s: %v", remoteFile, err))
+		sc.ConnectionLostHandler(err)
 		return nil, err
 	}
 
@@ -76,6 +116,8 @@ func (sc *sftpClient) GetRecords(remoteFile string, onReader func(file *sftp.Fil
 	file, err := sc.OpenFile(remoteFile)
 	if err == nil {
 		defer func(file *sftp.File) { _ = file.Close() }(file)
+	} else {
+		sc.ConnectionLostHandler(err)
 	}
 
 	// Read the file contents
@@ -88,22 +130,19 @@ func (sc *sftpClient) GetRecords(remoteFile string, onReader func(file *sftp.Fil
 }
 
 func (sc *sftpClient) Files(remoteDir string) []os.FileInfo {
-	entries, err := sc.ReadDir(remoteDir)
+	entries, err := sc.Client.ReadDir(remoteDir)
 	if err != nil {
 		slog.Error("Failed to read directory:", err)
+		sc.ConnectionLostHandler(err)
 		return []os.FileInfo{}
 	}
 	return entries
 }
 
 func (sc *sftpClient) RemoveFile(dirPath string) error {
-	return sc.Remove(dirPath)
-}
-
-// NewClient Create a new SFTP connection by given parameters
-func NewClient(c *Config) (SftpClient, error) {
-	client, err := c.connect()
-	return &sftpClient{Client: client}, err
+	err := sc.Client.Remove(dirPath)
+	sc.ConnectionLostHandler(err)
+	return err
 }
 
 // PutFile Upload file to sftp server
@@ -111,6 +150,7 @@ func (sc *sftpClient) PutFile(localFile, remoteFile string) (err error) {
 	srcFile, err := os.Open(localFile)
 	if err != nil {
 		slog.Error("Open file", err)
+		sc.ConnectionLostHandler(err)
 		return err
 	}
 	defer func(srcFile *os.File) { _ = srcFile.Close() }(srcFile)
@@ -121,12 +161,13 @@ func (sc *sftpClient) PutFile(localFile, remoteFile string) (err error) {
 	dirs := strings.Split(parent, path)
 	for _, dir := range dirs {
 		path = filepath.Join(path, dir)
-		_ = sc.Mkdir(path)
+		_ = sc.Client.Mkdir(path)
 	}
 
-	dstFile, err := sc.Create(remoteFile)
+	dstFile, err := sc.Client.Create(remoteFile)
 	if err != nil {
 		slog.Error("Create remote file", err)
+		sc.ConnectionLostHandler(err)
 		return err
 	}
 	defer func(dstFile *sftp.File) { _ = dstFile.Close() }(dstFile)
@@ -143,13 +184,14 @@ func (sc *sftpClient) PutString(text, remoteFile string) (err error) {
 	dirs := strings.Split(parent, path)
 	for _, dir := range dirs {
 		path = filepath.Join(path, dir)
-		_ = sc.Mkdir(path)
+		_ = sc.Client.Mkdir(path)
 	}
 
 	// Open a file on the remote SFTP server for writing
-	dstFile, err := sc.Create(remoteFile)
+	dstFile, err := sc.Client.Create(remoteFile)
 	if err != nil {
 		slog.Error("Open a file on the remote:", err)
+		sc.ConnectionLostHandler(err)
 	}
 	defer func(dstFile *sftp.File) { _ = dstFile.Close() }(dstFile)
 
@@ -165,7 +207,7 @@ func (sc *sftpClient) Close() error {
 	return sc.Client.Close()
 }
 
-func (sc *Config) connect() (client *sftp.Client, err error) {
+func connect(sc *Config) (client *sftp.Client, err error) {
 	config := &ssh.ClientConfig{
 		User:    sc.Username,
 		Auth:    []ssh.AuthMethod{ssh.Password(sc.Password)},
