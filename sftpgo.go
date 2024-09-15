@@ -58,7 +58,7 @@ func NewClient(conn SftpConn) (SftpClient, error) {
 						slog.Info("Reconnected")
 					} else {
 						ftpConn.ReconnectStatus <- false
-						slog.Error("Reconnect failure", e)
+						slog.Error("Reconnect failure", e.Error())
 					}
 				}
 			}
@@ -69,9 +69,11 @@ func NewClient(conn SftpConn) (SftpClient, error) {
 }
 
 func (sc *sftpClient) ConnectionLostHandler(err error) {
-	if strings.Contains(err.Error(), "connection lost") {
-		slog.Info("Reconnecting...")
-		sc.reconnect <- true
+	if err != nil {
+		if strings.Contains(err.Error(), "connection lost") {
+			slog.Info("Reconnecting...")
+			sc.reconnect <- true
+		}
 	}
 }
 
@@ -134,7 +136,7 @@ func (sc *sftpClient) GetRecords(remoteFile string, onReader func(file *sftp.Fil
 func (sc *sftpClient) Files(remoteDir string) []os.FileInfo {
 	entries, err := sc.Client.ReadDir(remoteDir)
 	if err != nil {
-		slog.Error("Failed to read directory:", err)
+		slog.Error("Failed to read directory:", err.Error())
 		sc.ConnectionLostHandler(err)
 		return []os.FileInfo{}
 	}
@@ -151,7 +153,7 @@ func (sc *sftpClient) RemoveFile(dirPath string) error {
 func (sc *sftpClient) PutFile(localFile, remoteFile string) (err error) {
 	srcFile, err := os.Open(localFile)
 	if err != nil {
-		slog.Error("Open file", err)
+		slog.Error("Open file", err.Error())
 		sc.ConnectionLostHandler(err)
 		return err
 	}
@@ -168,7 +170,7 @@ func (sc *sftpClient) PutFile(localFile, remoteFile string) (err error) {
 
 	dstFile, err := sc.Client.Create(remoteFile)
 	if err != nil {
-		slog.Error("Create remote file", err)
+		slog.Error("Create remote file", err.Error())
 		sc.ConnectionLostHandler(err)
 		return err
 	}
@@ -192,7 +194,7 @@ func (sc *sftpClient) PutString(text, remoteFile string) (err error) {
 	// Open a file on the remote SFTP server for writing
 	dstFile, err := sc.Client.Create(remoteFile)
 	if err != nil {
-		slog.Error("Open a file on the remote:", err)
+		slog.Error("Open a file on the remote:", err.Error())
 		sc.ConnectionLostHandler(err)
 	}
 	defer func(dstFile *sftp.File) { _ = dstFile.Close() }(dstFile)
@@ -200,7 +202,7 @@ func (sc *sftpClient) PutString(text, remoteFile string) (err error) {
 	// Write the string text to the remote file
 	_, err = io.Copy(dstFile, strings.NewReader(text))
 	if err != nil {
-		slog.Error("Copy a text to remote:", err)
+		slog.Error("Copy a text to remote:", err.Error())
 	}
 	return nil
 }
