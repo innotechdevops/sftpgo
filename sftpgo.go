@@ -3,16 +3,14 @@ package sftpgo
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
-
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
@@ -35,27 +33,31 @@ type SftpClient interface {
 }
 
 type sftpClient struct {
-	Client    *sftp.Client
-	reconnect chan bool
+	Client          *sftp.Client
+	reconnect       chan bool
+	ReconnectStatus chan bool
 }
 
 // NewClient Create a new SFTP connection by given parameters
-func NewClient(c *Config) (SftpClient, error) {
-	client, err := connect(c)
+func NewClient(conn SftpConn) (SftpClient, error) {
+	client, err := conn.Connect()
 
 	reconnect := make(chan bool)
-	sftpConn := &sftpClient{Client: client, reconnect: reconnect}
+	status := make(chan bool)
+	ftpConn := &sftpClient{Client: client, reconnect: reconnect, ReconnectStatus: status}
 	go func() {
 		// Receive connection when connection lose
 		for {
 			select {
 			case res := <-reconnect:
 				if res {
-					conn, e := connect(c)
+					newConn, e := conn.Connect()
 					if e == nil {
-						sftpConn.Client = conn
+						ftpConn.Client = newConn
+						ftpConn.ReconnectStatus <- true
 						slog.Info("Reconnected")
 					} else {
+						ftpConn.ReconnectStatus <- false
 						slog.Error("Reconnect failure", e)
 					}
 				}
@@ -63,7 +65,7 @@ func NewClient(c *Config) (SftpClient, error) {
 		}
 	}()
 
-	return sftpConn, err
+	return ftpConn, err
 }
 
 func (sc *sftpClient) ConnectionLostHandler(err error) {
@@ -205,36 +207,6 @@ func (sc *sftpClient) PutString(text, remoteFile string) (err error) {
 
 func (sc *sftpClient) Close() error {
 	return sc.Client.Close()
-}
-
-func connect(sc *Config) (client *sftp.Client, err error) {
-	config := &ssh.ClientConfig{
-		User:    sc.Username,
-		Auth:    []ssh.AuthMethod{ssh.Password(sc.Password)},
-		Timeout: 30 * time.Second,
-	}
-	if sc.SSHTrustedKey != "" {
-		config.HostKeyCallback = trustedHostKeyCallback(sc.SSHTrustedKey)
-	} else {
-		config.HostKeyCallback = ssh.InsecureIgnoreHostKey()
-	}
-
-	// Connect to ssh
-	addr := fmt.Sprintf("%s:%d", sc.Host, sc.Port)
-	conn, err := ssh.Dial("tcp", addr, config)
-	if err != nil {
-		slog.Error("Connect fail:", err)
-		return nil, err
-	}
-
-	// Create sftp client
-	client, err = sftp.NewClient(conn)
-	if err != nil {
-		slog.Error("New client fail:", err)
-		return nil, err
-	}
-
-	return client, nil
 }
 
 // SSH Key-strings

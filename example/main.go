@@ -16,8 +16,8 @@ func New() sftpgo.SftpClient {
 		Password: os.Getenv("PASS"),
 		Port:     2022,
 	}
-
-	csftp, err := sftpgo.NewClient(&config)
+	ftpConn := sftpgo.NewSftpConn(&config)
+	csftp, err := sftpgo.NewClient(ftpConn)
 	if err != nil {
 		log.Panic("New SFTP client", err.Error())
 	}
