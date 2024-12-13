@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -30,6 +31,7 @@ type SftpClient interface {
 	RemoveFile(dirPath string) error
 	Close() error
 	ConnectionLostHandler(err error)
+	EnsureDirExists(filePath string) error
 }
 
 type sftpClient struct {
@@ -75,6 +77,27 @@ func (sc *sftpClient) ConnectionLostHandler(err error) {
 			sc.reconnect <- true
 		}
 	}
+}
+
+func (sc *sftpClient) EnsureDirExists(filePath string) error {
+	dirPath := path.Dir(filePath)
+	parts := strings.Split(dirPath, "/")
+	currentPath := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		currentPath = path.Join(currentPath, part)
+		if _, err := sc.Client.Stat(currentPath); os.IsNotExist(err) {
+			errMk := sc.Client.Mkdir(currentPath)
+			if errMk != nil {
+				return fmt.Errorf("failed to create directory %s: %w", currentPath, err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("failed to stat directory %s: %w", currentPath, err)
+		}
+	}
+	return nil
 }
 
 func (sc *sftpClient) MoveFile(sourcePath string, destPath string) error {
